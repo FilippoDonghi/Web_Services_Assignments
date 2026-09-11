@@ -1,8 +1,0 @@
-url_to_shorten_1,url_to_shorten_2,url_after_update,not_existing_id,invalid_url
-
-https://en.wikipedia.org/wiki/Dijkstra's_algorithm,https://en.wikipedia.org/wiki/Ducati,https://en.wikipedia.org/wiki/Caproni,1,htInvalid_url/
-https://en.wikipedia.org/wiki/Shortest_path_problem,https://en.wikipedia.org/wiki/Cagiva,https://en.wikipedia.org/wiki/Leonardo_S.p.A.,2,htInvalid_url/
-https://en.wikipedia.org/wiki/Bellman–Ford_algorithm,https://en.wikipedia.org/wiki/Desmodromic_valve,https://en.wikipedia.org/wiki/AgustaWestland,1,htInvalid_url/
-https://en.wikipedia.org/wiki/Network_topology,https://en.wikipedia.org/wiki/Clutch#Dry_clutch,https://en.wikipedia.org/wiki/Alenia_Aermacchi,2,htInvalid_url/
-https://en.wikipedia.org/wiki/Physical_layer,https://en.wikipedia.org/wiki/Manual_transmission,https://en.wikipedia.org/wiki/OTO_Melara,1,htInvalid_url/
-https://en.wikipedia.org/wiki/Bitstream,https://en.wikipedia.org/wiki/Torque_converter,https://en.wikipedia.org/wiki/Saab_AB,2,htInvalid_url/

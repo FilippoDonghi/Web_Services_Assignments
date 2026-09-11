@@ -1,70 +1,105 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shortener-data
+  namespace: url-shortener
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 256Mi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  annotations:
-    deployment.kubernetes.io/revision: "6"
-    kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"shortener","namespace":"webservice"},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"shortener"}},"template":{"metadata":{"labels":{"app":"shortener"}},"spec":{"containers":[{"image":"your-registry/shortener:latest","name":"shortener","ports":[{"containerPort":8080}],"volumeMounts":[{"mountPath":"/data","name":"db-volume"}]}],"volumes":[{"name":"db-volume","persistentVolumeClaim":{"claimName":"shortener-pvc"}}]}}}}
-  creationTimestamp: "2026-03-06T02:06:32Z"
-  generation: 8
   name: shortener
-  namespace: webservice
-  resourceVersion: "972026"
-  uid: 7f7cce91-f25f-4850-9435-d045c4af9ea4
+  namespace: url-shortener
 spec:
-  progressDeadlineSeconds: 600
-  replicas: 3
-  revisionHistoryLimit: 10
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app: shortener
-  strategy:
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
-    type: RollingUpdate
+      app.kubernetes.io/name: shortener
+      app.kubernetes.io/part-of: url-shortener
   template:
     metadata:
-      annotations:
-        kubectl.kubernetes.io/restartedAt: "2026-03-06T03:38:55+01:00"
-      creationTimestamp: null
       labels:
-        app: shortener
+        app.kubernetes.io/name: shortener
+        app.kubernetes.io/part-of: url-shortener
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
-      - env:
-        - name: AUTH_BASE_URL
-          value: http://auth:5001
-        image: nichb/shortener:latest
-        imagePullPolicy: Always
-        name: shortener
-        ports:
-        - containerPort: 8080
-          protocol: TCP
-        resources: {}
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-      dnsPolicy: ClusterFirst
-      restartPolicy: Always
-      schedulerName: default-scheduler
-      securityContext: {}
-      terminationGracePeriodSeconds: 30
-status:
-  availableReplicas: 3
-  conditions:
-  - lastTransitionTime: "2026-03-06T02:42:29Z"
-    lastUpdateTime: "2026-03-06T02:42:29Z"
-    message: Deployment has minimum availability.
-    reason: MinimumReplicasAvailable
-    status: "True"
-    type: Available
-  - lastTransitionTime: "2026-03-06T02:26:14Z"
-    lastUpdateTime: "2026-03-11T17:29:15Z"
-    message: ReplicaSet "shortener-d8889d4f4" has successfully progressed.
-    reason: NewReplicaSetAvailable
-    status: "True"
-    type: Progressing
-  observedGeneration: 8
-  readyReplicas: 3
-  replicas: 3
-  updatedReplicas: 3
+        - name: shortener
+          image: url-shortener-shortener:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AUTH_BASE_URL
+              value: http://auth:5001
+            - name: AUTH_TIMEOUT_SECONDS
+              value: "2"
+            - name: INSTANCE_PATH
+              value: /data/instance
+            - name: PUBLIC_PATH_PREFIX
+              value: /shortener
+          ports:
+            - name: http
+              containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          volumeMounts:
+            - name: data
+              mountPath: /data/instance
+            - name: temporary-files
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: shortener-data
+        - name: temporary-files
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shortener
+  namespace: url-shortener
+spec:
+  selector:
+    app.kubernetes.io/name: shortener
+    app.kubernetes.io/part-of: url-shortener
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http

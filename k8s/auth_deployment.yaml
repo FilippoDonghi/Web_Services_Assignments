@@ -1,65 +1,104 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: auth-data
+  namespace: url-shortener
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 256Mi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  annotations:
-    deployment.kubernetes.io/revision: "3"
-    kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"auth","namespace":"webservice"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"auth"}},"template":{"metadata":{"labels":{"app":"auth"}},"spec":{"containers":[{"image":"your-registry/auth:latest","name":"auth","ports":[{"containerPort":8080}]}]}}}}
-  creationTimestamp: "2026-03-06T02:06:33Z"
-  generation: 3
   name: auth
-  namespace: webservice
-  resourceVersion: "7059"
-  uid: 186c7447-962c-4494-aea8-1d6aa87f9ace
+  namespace: url-shortener
 spec:
-  progressDeadlineSeconds: 600
   replicas: 1
-  revisionHistoryLimit: 10
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app: auth
-  strategy:
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
-    type: RollingUpdate
+      app.kubernetes.io/name: auth
+      app.kubernetes.io/part-of: url-shortener
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        app: auth
+        app.kubernetes.io/name: auth
+        app.kubernetes.io/part-of: url-shortener
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
-      - image: nichb/auth:latest
-        imagePullPolicy: Always
-        name: auth
-        ports:
-        - containerPort: 8080
-          protocol: TCP
-        resources: {}
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-      dnsPolicy: ClusterFirst
-      restartPolicy: Always
-      schedulerName: default-scheduler
-      securityContext: {}
-      terminationGracePeriodSeconds: 30
-status:
-  availableReplicas: 1
-  conditions:
-  - lastTransitionTime: "2026-03-06T02:10:17Z"
-    lastUpdateTime: "2026-03-06T02:10:17Z"
-    message: Deployment has minimum availability.
-    reason: MinimumReplicasAvailable
-    status: "True"
-    type: Available
-  - lastTransitionTime: "2026-03-06T02:06:33Z"
-    lastUpdateTime: "2026-03-06T02:26:45Z"
-    message: ReplicaSet "auth-7f4845c8bb" has successfully progressed.
-    reason: NewReplicaSetAvailable
-    status: "True"
-    type: Progressing
-  observedGeneration: 3
-  readyReplicas: 1
-  replicas: 1
-  updatedReplicas: 1
+        - name: auth
+          image: url-shortener-auth:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: INSTANCE_PATH
+              value: /data/instance
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: url-shortener-secrets
+                  key: jwt-secret
+          ports:
+            - name: http
+              containerPort: 5001
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          volumeMounts:
+            - name: data
+              mountPath: /data/instance
+            - name: temporary-files
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: auth-data
+        - name: temporary-files
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: url-shortener
+spec:
+  selector:
+    app.kubernetes.io/name: auth
+    app.kubernetes.io/part-of: url-shortener
+  ports:
+    - name: http
+      port: 5001
+      targetPort: http
