@@ -1,207 +1,118 @@
-# url-shortener-k8s
+# URL shortener services — security and reliability refactor
 
-A production-style URL shortener built with a microservice architecture, containerized with Docker, and deployed on Kubernetes. The project covers the full stack from REST API design to cloud-native deployment. Built as part of a university Web Services course.
+[![CI](https://github.com/FilippoDonghi/Web_Services_Assignments/actions/workflows/ci.yml/badge.svg)](https://github.com/FilippoDonghi/Web_Services_Assignments/actions/workflows/ci.yml)
+
+This repository is a university assignment fork used as a focused refactoring case study. It contains a Flask authentication service, a Flask URL shortener, and an Nginx gateway. The goal is to make a small teaching project safer to clone, understand, test, and run—not to present it as a production platform.
+
+## Attribution and scope
+
+The original project is [`Nicholas-03/url-shortener-k8s`](https://github.com/Nicholas-03/url-shortener-k8s). Its public baseline is a single commit credited to `Nicholas-03`; it contains no Filippo-authored commits. Filippo's portfolio contribution is this later security and reliability refactor, and the original assignment implementation is not claimed as his work.
+
+The refactor replaces the baseline's hard-coded, hand-rolled token scheme and plaintext password storage; removes references to a dead public demo; and adds deterministic tests and reproducible development tooling. Commit history remains the source of truth for individual changes.
+
+## What this branch demonstrates
+
+- application-factory Flask services with strict JSON schemas and consistent error bodies;
+- JWTs issued through maintained `PyJWT`, signed with a required environment secret, and checked for issuer and expiry;
+- scrypt password hashes via Werkzeug—passwords are never written to the JSON store;
+- bounded service-to-service calls and strict `Authorization: Bearer <token>` parsing;
+- validated HTTP/HTTPS destinations, random short IDs, real `302` responses with `Location`, ownership checks, and meaningful delete responses;
+- in-process locking plus atomic file replacement for a deliberately single-process JSON demo;
+- non-root containers, a loopback-only Compose gateway, health checks, exact direct-dependency versions, pytest, Ruff, dependency auditing, and least-privilege CI permissions.
 
 ## Architecture
 
+```text
+client -> Nginx :8080
+           |-- /auth/*      -> auth :5001 -> auth/database.json
+           `-- /shortener/* -> shortener :5000 -> shortener/database.json
+                                      |
+                                      `-> auth /validate (2 s timeout)
 ```
-Client
-  │
-  ▼
-Nginx (reverse proxy, single entry point)
-  ├── /auth/*      → Auth Service (Flask, port 5001)
-  └── /shortener/* → Shortener Service (Flask, port 5000)
-```
 
-Two independent Flask microservices communicate internally. Nginx acts as the single public entry point, routing traffic by path prefix. Each service has its own persistent volume for data storage.
+## Run with Docker Compose
 
-## Skills demonstrated
+Requirements: Docker with Compose v2 and Python 3 for generating a random secret.
 
-| Area | Details |
-|---|---|
-| **REST API design** | Full CRUD endpoints, correct HTTP verbs and status codes |
-| **Microservices** | Two decoupled services with internal service discovery |
-| **JWT (from scratch)** | HS256 token generation and validation using `hmac` + `base64` — no external JWT library |
-| **Authentication flow** | Token-based auth: login → JWT → protected endpoints via `Authorization` header |
-| **Docker** | Multi-service `docker-compose.yml`, custom Dockerfiles, named volumes for persistence |
-| **Kubernetes** | Deployment manifests, services, persistent volumes, multi-namespace management |
-| **Nginx** | Reverse proxy config, path-based routing, header forwarding |
-| **Python / Flask** | RESTful routing, JSON request/response handling, environment-based config |
-
-## Services
-
-### Auth Service
-Handles user lifecycle and token issuance.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/users` | Register a new user |
-| `POST` | `/users/login` | Login and receive a JWT |
-| `PUT` | `/users/` | Update password |
-| `POST` | `/validate` | Validate a JWT (used internally by the shortener) |
-
-### Shortener Service
-Manages shortened URLs. All endpoints except `GET /:id` require a valid JWT in the `Authorization` header.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | List all URLs owned by the authenticated user |
-| `GET` | `/:id` | Resolve a short ID to its destination URL |
-| `POST` | `/` | Create a new shortened URL |
-| `PUT` | `/:id` | Update the destination of an existing short URL |
-| `DELETE` | `/:id` | Delete a specific short URL |
-| `DELETE` | `/` | Delete all URLs owned by the authenticated user |
-
-## Stack
-
-- **Python 3 / Flask** — microservice logic
-- **Nginx** — reverse proxy and single-port exposure
-- **Docker & Docker Compose** — containerization and local orchestration
-- **Kubernetes** — cluster deployment with `kubectl`
-- **JWT / HMAC-SHA256** — stateless authentication
-
----
-
-## 1) Docker Compose (start, inspect, and stop stack)
+From the repository root, this command builds the images, waits for health checks, and exposes only Nginx on `http://127.0.0.1:8080`:
 
 ```bash
-# Start all services in the background and build images
-docker compose -f docker-compose.yml up --build -d
-
-# Show stack container status
-docker compose -f docker-compose.yml ps
-
-# Stream logs in real time
-docker compose -f docker-compose.yml logs -f
-
-# Stop and remove stack containers
-docker compose -f docker-compose.yml down
+JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+  docker compose up --build --wait
 ```
 
-## 2) Kubernetes - deployment and cluster status
+The secret is supplied to that Compose process only; it is not committed or given an insecure default. Named volumes preserve the two JSON files across normal restarts. Stop the stack with `docker compose down`; add `--volumes` only when you intentionally want to delete the demo data.
+
+### Try the main flow
 
 ```bash
-# Verify the Kubernetes cluster is reachable
-kubectl cluster-info
+curl --fail-with-body -X POST http://127.0.0.1:8080/auth/users \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"correct horse battery staple"}'
 
-# Apply all YAML manifests in the current folder
-kubectl apply -f .
+TOKEN="$(curl --fail-with-body -sS -X POST http://127.0.0.1:8080/auth/users/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"alice","password":"correct horse battery staple"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
 
-# List cluster nodes
-kubectl get nodes
+curl --fail-with-body -X POST http://127.0.0.1:8080/shortener/ \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/docs"}'
 
-# List pods in the current namespace
-kubectl get pods
-
-# List pods across all namespaces
-kubectl get -A pods
-
-# List deployments across all namespaces
-kubectl get deployments -A
-
-# List services across all namespaces
-kubectl get svc -A
-
-# List endpoints across all namespaces
-kubectl get endpoints -A
-
-# List pods across all namespaces with extra details (node IP, etc.)
-kubectl get pods -A -o wide
-
-# Periodically refresh node view
-watch kubectl get nodes
-
-# Periodically refresh pod view across all namespaces
-watch kubectl get -A pods
+curl --fail-with-body http://127.0.0.1:8080/shortener/ \
+  -H "Authorization: Bearer ${TOKEN}"
 ```
 
-## 3) Kubernetes - detailed resource diagnostics
+Open the `Location` returned by the create request, or request `/shortener/<id>` with `curl -i`, to observe the `302` redirect.
+
+## API summary
+
+Successful responses and common failure states are covered by the test suite. Errors use `{"error":{"code":"...","message":"..."}}`. The paths below are service-local; through Nginx, prepend `/auth` or `/shortener` as shown in the runnable examples.
+
+| Service | Method | Path | Authentication | Result |
+|---|---|---|---|---|
+| Auth | `GET` | `/health` | No | Health status |
+| Auth | `POST` | `/users` | No | Register a user |
+| Auth | `POST` | `/users/login` | No | Return a Bearer access token |
+| Auth | `PUT` | `/users/password` | Old password in body | Change a password |
+| Auth | `POST` | `/validate` | Token in JSON body | Internal token validation |
+| Shortener | `GET` | `/health` | No | Health status |
+| Shortener | `GET` | `/` | Bearer | List the caller's links |
+| Shortener | `POST` | `/` | Bearer | Create a link from `{"url":"..."}` |
+| Shortener | `PUT` | `/<id>` | Bearer owner | Change the destination |
+| Shortener | `DELETE` | `/<id>` | Bearer owner | Delete one link |
+| Shortener | `DELETE` | `/` | Bearer | Delete all links owned by the caller |
+| Shortener | `GET` | `/<id>` | No | Redirect to the destination |
+
+## Local checks
+
+Python 3.13 is the supported development version.
 
 ```bash
-# Full details for a specific deployment
-kubectl describe deployment <deployment-name> -n <namespace>
-
-# Full details for a specific pod
-kubectl describe pod <pod-name> -n <namespace>
-
-# Full details for a specific service
-kubectl describe svc <service-name> -n <namespace>
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+ruff check .
+ruff format --check .
+pytest
+pip-audit -r auth/requirements.txt
+pip-audit -r shortener/requirements.txt
+kubernetes-validate --strict k8s/namespace.yaml k8s/*_deployment.yaml
 ```
 
-## 4) Kubernetes - logs and pod verification
+Tests use Flask's in-process client and temporary directories. They do not need running services, fixed ports, network access, or persistent test accounts. GitHub Actions repeats linting, tests, dependency audits, Compose validation, and image builds with read-only repository permissions.
 
-```bash
-# Pod logs in current namespace
-kubectl logs <pod-name>
+## Persistence and limitations
 
-# Pod logs in a specific namespace
-kubectl -n <namespace> logs <pod-name>
+The JSON stores are appropriate only for a single-process demonstration. Atomic replacement avoids partial files and locks coordinate threads in one process, but there is no cross-process or distributed lock. The containers therefore run one Gunicorn worker and the Kubernetes examples use one replica. Use a transactional database before attempting horizontal scaling.
 
-# Extended pod information (including node and IP)
-kubectl get pod <pod-name> -o wide
-```
+This project also omits TLS termination, rate limiting, refresh/revocation flows, email verification, backups, metrics, and a deployment-specific secret manager. Those are intentional boundaries, not production-readiness claims.
 
-## 5) Application endpoint tests with curl
+The files in [`k8s/`](k8s/) are cleaned-up, declarative learning examples; they are not a supported or verified live deployment. See [`k8s/README.md`](k8s/README.md) for assumptions and safe secret creation.
 
-```bash
-# Test root endpoint via NodePort
-curl http://<node-ip>:<nodeport>/
+## Licensing
 
-# Test shortener endpoint via NodePort
-curl http://<node-ip>:<nodeport>/shortener/0
-
-# Test root endpoint via public domain
-curl http://app.nicholasboidi.tech/
-
-# Test shortener endpoint via public domain
-curl http://app.nicholasboidi.tech/shortener/0
-
-# Test with Host header forced to the VM public IP
-curl -H "Host: app.nicholasboidi.tech" http://<public-vm-ip>/shortener/0
-```
-
-## 6) Node access and local container management
-
-```bash
-# SSH into the node
-ssh <user>@<node-ip>
-
-# List running Docker containers on the node
-docker ps
-
-# Restart a specific container
-docker restart <container-id>
-```
-
-## 7) Kubernetes resource cleanup
-
-```bash
-# Delete resources created from YAML files in the current folder
-kubectl delete -f .
-```
-
-## 8) Files and manifests reference
-
-### Docker Compose stack
-- `docker-compose.yml`
-- `default.conf`
-- `Dockerfile` (auth microservice)
-- `Dockerfile` (shortener microservice)
-
-### Kubernetes manifests
-- `internal-services.yaml`
-- `nginx.yaml`
-- `nginx-config.yaml`
-
-### VM files generated during cluster setup
-- `~/.kube/config`
-- `/etc/kubernetes/admin.conf`
-- `/var/lib/kubelet/config.yaml`
-- `/var/lib/kubelet/kubeadm-flags.env`
-
-### Read manifest files on the VM
-```bash
-cat ~/internal-services.yaml
-cat ~/nginx.yaml
-cat ~/nginx-config.yaml
-```
+The upstream assignment does not supply an open-source licence. This refactor preserves
+its attribution and does not grant new rights to the original contributors' code;
+contact the contributors before redistributing it.

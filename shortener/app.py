@@ -1,115 +1,153 @@
-from url import Url
+"""URL shortener service application factory."""
+
 import os
-from utils import *
-from flask import Flask, request, jsonify
-from config import URL_SHORTENER_PORT
 from pathlib import Path
+from typing import Any
 
-INSTANCE_PATH = str((Path(__file__).resolve().parent / "instance").resolve())
-BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
+from flask import Flask, Response, jsonify, redirect, request, url_for
+from werkzeug.exceptions import HTTPException
 
-app = Flask(__name__, instance_path=INSTANCE_PATH)
+from .config import BIND_HOST, PUBLIC_PATH_PREFIX, URL_SHORTENER_PORT
+from .url import UrlStore
+from .utils import AuthClient, AuthServiceUnavailable, InvalidAuthorization, is_valid_url
 
-# GET / - Returns a list of all existing keys
-@app.get("/")
-def getUrls():
-    token = request.headers.get('Authorization')
-    username = validateToken(token)
 
-    if not username:
-        return jsonify("forbidden"), 403
+class ApiError(Exception):
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
 
-    keys = list(Url.getUrls(username))
 
-    if len(keys) == 0:
-        return jsonify({"value": None}), 200
-    
-    return jsonify({"value": keys}), 200
+def _error(code: str, message: str, status: int) -> tuple[Response, int]:
+    return jsonify({"error": {"code": code, "message": message}}), status
 
-# GET /:id - Returns URL for a given key
-@app.get("/<id>")
-def returnUrl(id):
-    if id in Url.urls:
-        url = Url.urls[id]['url']
-        return jsonify({"value": url}), 301
-    else:
-        return jsonify("Not Found"), 404
 
-# POST / - Creates a new key for a provided URL
-@app.post("/")
-def addUrl():
+def _json_object(required_fields: set[str]) -> dict[str, Any]:
     if not request.is_json:
-        return jsonify("Error"), 400
-    
-    token = request.headers.get('Authorization')
-    username = validateToken(token)
+        raise ApiError(415, "unsupported_media_type", "Content-Type must be application/json")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ApiError(400, "invalid_json", "Request body must be a JSON object")
+    missing = sorted(required_fields - data.keys())
+    unexpected = sorted(data.keys() - required_fields)
+    if missing:
+        raise ApiError(400, "missing_fields", f"Missing fields: {', '.join(missing)}")
+    if unexpected:
+        raise ApiError(400, "unexpected_fields", f"Unexpected fields: {', '.join(unexpected)}")
+    return data
 
-    if not username:
-        return jsonify("forbidden"), 403
-    
-    data = request.get_json()
-    url = data.get('value')
 
-    if not is_valid_url(url):
-        return jsonify("Error"), 400
-    
-    id = Url.addUrl(url, username)
-    return jsonify({"id": id}), 201
-    
-# PUT /:id - Updates the destination URL for a key
-@app.put("/<id>")
-def update(id):
-    token = request.headers.get('Authorization')
-    username = validateToken(token)
+def create_app(instance_path: str | None = None, auth_client: Any | None = None) -> Flask:
+    resolved_instance = Path(
+        instance_path
+        or os.environ.get("INSTANCE_PATH")
+        or Path(__file__).resolve().parent / "instance"
+    ).resolve()
+    app = Flask(__name__, instance_path=str(resolved_instance), instance_relative_config=True)
+    app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+    urls = UrlStore(app.instance_path)
+    authenticator = auth_client or AuthClient()
+    app.extensions["url_store"] = urls
+    app.extensions["auth_client"] = authenticator
 
-    if not username:
-        return jsonify("forbidden"), 403
-    
-    data = request.get_json(force=True)
-    url = data.get('url')
-    
-    if id not in Url.urls:
-        return jsonify("Not Found"), 404
-    
-    if Url.urls[id]['owner'] != username:
-        return jsonify("forbidden"), 403
-    
-    if not is_valid_url(url):
-        return jsonify("Error"), 400
+    def authenticated_username() -> str:
+        try:
+            username = authenticator.validate_authorization(request.headers.get("Authorization"))
+        except InvalidAuthorization as exc:
+            raise ApiError(401, "invalid_authorization", str(exc)) from exc
+        except AuthServiceUnavailable as exc:
+            raise ApiError(
+                503,
+                "authentication_unavailable",
+                "Authentication service is temporarily unavailable",
+            ) from exc
+        if username is None:
+            raise ApiError(401, "invalid_token", "Bearer token is invalid or expired")
+        return username
 
-    Url.urls[id]['url'] = url
-    Url.updateDatabase()
-    return "", 200
+    @app.errorhandler(ApiError)
+    def handle_api_error(exc: ApiError) -> tuple[Response, int]:
+        response, status = _error(exc.code, exc.message, exc.status)
+        if status == 401:
+            response.headers["WWW-Authenticate"] = "Bearer"
+        return response, status
 
-# DELETE /:id - Removes a specific URL
-@app.delete("/<id>")
-def deleteUrl(id):
-    token = request.headers.get('Authorization')
-    username = validateToken(token)
+    @app.errorhandler(HTTPException)
+    def handle_http_error(exc: HTTPException) -> tuple[Response, int]:
+        return _error(exc.name.lower().replace(" ", "_"), exc.description, exc.code or 500)
 
-    if not username:
-        return jsonify("forbidden"), 403
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(exc: Exception) -> tuple[Response, int]:
+        app.logger.exception("Unhandled URL shortener service error", exc_info=exc)
+        return _error("internal_error", "An unexpected error occurred", 500)
 
-    if id in Url.urls and Url.urls[id]['owner'] == username:
-        del Url.urls[id]
-        Url.updateDatabase()
+    @app.get("/health")
+    def health() -> tuple[Response, int]:
+        return jsonify({"status": "ok"}), 200
+
+    @app.get("/")
+    def list_urls() -> tuple[Response, int]:
+        items = urls.list_for_owner(authenticated_username())
+        return jsonify({"items": items, "count": len(items)}), 200
+
+    @app.get("/<short_id>")
+    def return_url(short_id: str) -> Response | tuple[Response, int]:
+        record = urls.get(short_id)
+        if record is None:
+            return _error("not_found", "Short URL was not found", 404)
+        return redirect(record["url"], code=302)
+
+    @app.post("/")
+    def add_url() -> tuple[Response, int]:
+        username = authenticated_username()
+        destination = _json_object({"url"})["url"]
+        if not is_valid_url(destination):
+            raise ApiError(400, "invalid_url", "URL must be an absolute HTTP or HTTPS URL")
+        short_id = urls.add(destination, username)
+        response = jsonify({"id": short_id, "url": destination})
+        response.headers["Location"] = (
+            f"{PUBLIC_PATH_PREFIX}/{short_id}"
+            if PUBLIC_PATH_PREFIX
+            else url_for("return_url", short_id=short_id)
+        )
+        return response, 201
+
+    @app.put("/<short_id>")
+    def update_url(short_id: str) -> tuple[Response, int] | tuple[str, int]:
+        username = authenticated_username()
+        destination = _json_object({"url"})["url"]
+        if not is_valid_url(destination):
+            raise ApiError(400, "invalid_url", "URL must be an absolute HTTP or HTTPS URL")
+        outcome = urls.update_for_owner(short_id, destination, username)
+        if outcome == "missing":
+            return _error("not_found", "Short URL was not found", 404)
+        if outcome == "forbidden":
+            return _error("forbidden", "Short URL belongs to another user", 403)
         return "", 204
-    else:
-        return jsonify("Not found"), 404
 
-# DELETE / - Clears the repository
-@app.delete("/")
-def deleteNull():
-    token = request.headers.get('Authorization')
-    username = validateToken(token)
+    @app.delete("/<short_id>")
+    def delete_url(short_id: str) -> tuple[Response, int] | tuple[str, int]:
+        outcome = urls.delete_for_owner(short_id, authenticated_username())
+        if outcome == "missing":
+            return _error("not_found", "Short URL was not found", 404)
+        if outcome == "forbidden":
+            return _error("forbidden", "Short URL belongs to another user", 403)
+        return "", 204
 
-    if not username:
-        return jsonify("forbidden"), 403
+    @app.delete("/")
+    def delete_all_urls() -> tuple[Response, int]:
+        deleted = urls.delete_all_for_owner(authenticated_username())
+        return jsonify({"deleted": deleted}), 200
 
-    Url.deleteAllUrls(username)
-    return jsonify("Not Found"), 404
+    return app
 
-Url.loadData(app)
 
-if __name__ == '__main__':
-    app.run(host=BIND_HOST, port=URL_SHORTENER_PORT)
+def main() -> None:
+    """Run Flask's development server for local debugging only."""
+    create_app().run(host=BIND_HOST, port=URL_SHORTENER_PORT)
+
+
+if __name__ == "__main__":
+    main()

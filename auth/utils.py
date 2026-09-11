@@ -1,70 +1,51 @@
-import time, json
-import base64
-import hashlib, hmac
+"""JWT creation and verification."""
 
-SECRET_KEY = "mySecretKey"
+from datetime import UTC, datetime, timedelta
 
-def createToken(username):
-    header = {
-        "typ": "JWT",
-        "alg": "HS256"
-    }
-    headerJson = json.dumps(header, separators=(',', ':')) # removes white spaces
-    encodedHeader = base64.b64encode(headerJson.encode('utf-8')).decode('utf-8')
+import jwt
 
-    payload = {
-        "username": username,
-        "exp": int(time.time()) + 3600 # in seconds
-    }
-    payloadJson = json.dumps(payload, separators=(',', ':')) # removes white spaces
-    encodedPayload = base64.b64encode(payloadJson.encode('utf-8')).decode('utf-8')
 
-    message = f"{encodedHeader}.{encodedPayload}"
-    
-    signature = hmac.new(
-        SECRET_KEY.encode('utf-8'),
-        message.encode('utf-8'),
-        hashlib.sha256
-    ).digest()
-    encodedSignature = base64.b64encode(signature).decode('utf-8')
-    
-    return f"{encodedHeader}.{encodedPayload}.{encodedSignature}"
+class TokenManager:
+    """Issue and verify short-lived, HMAC-signed access tokens."""
 
-def validateToken(token):
-    try:
-        # Split the JWT into its three parts
-        parts = token.split('.')
-        if len(parts) != 3:
-            print("Wrong length")
-            return None
-        
-        encodedHeader, encodedPayload, encodedSignature = parts
-        
-        # Recreate the signature
-        message = f"{encodedHeader}.{encodedPayload}"
-        expectedSignature = hmac.new(
-            SECRET_KEY.encode('utf-8'),
-            message.encode('utf-8'),
-            hashlib.sha256
-        ).digest()
-        expectedSignature_b64 = base64.b64encode(expectedSignature).decode('utf-8')
-        
-        # Compare signatures
-        if encodedSignature != expectedSignature_b64:
-            print("Wrong signature")
-            return None
-        
-        # Decode and parse the payload
-        payloadJson = base64.b64decode(encodedPayload).decode('utf-8')
-        payload = json.loads(payloadJson)
-        
-        # Check if token is expired
-        if payload['exp'] < int(time.time()):
-            print("Token expired")
-            return None
-        
-        # Return the username
-        return payload['username']
-        
-    except Exception:
-        return None
+    def __init__(self, secret: str, issuer: str, ttl_seconds: int) -> None:
+        if not isinstance(secret, str) or len(secret.encode("utf-8")) < 32:
+            raise RuntimeError("JWT_SECRET must contain at least 32 bytes")
+        if not isinstance(issuer, str) or not issuer:
+            raise RuntimeError("TOKEN_ISSUER must not be empty")
+        if ttl_seconds < 1:
+            raise RuntimeError("TOKEN_TTL_SECONDS must be positive")
+
+        self._secret = secret
+        self._issuer = issuer
+        self._ttl_seconds = ttl_seconds
+
+    @property
+    def ttl_seconds(self) -> int:
+        return self._ttl_seconds
+
+    def create(self, username: str) -> str:
+        now = datetime.now(UTC)
+        return jwt.encode(
+            {
+                "sub": username,
+                "iss": self._issuer,
+                "iat": now,
+                "exp": now + timedelta(seconds=self._ttl_seconds),
+            },
+            self._secret,
+            algorithm="HS256",
+        )
+
+    def validate(self, token: str) -> str:
+        payload = jwt.decode(
+            token,
+            self._secret,
+            algorithms=["HS256"],
+            issuer=self._issuer,
+            options={"require": ["exp", "iat", "iss", "sub"]},
+        )
+        subject = payload["sub"]
+        if not isinstance(subject, str) or not subject:
+            raise jwt.InvalidTokenError("token subject is invalid")
+        return subject
