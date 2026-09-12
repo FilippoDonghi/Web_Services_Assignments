@@ -6,9 +6,7 @@ This repository is a university assignment fork used as a focused refactoring ca
 
 ## Attribution and scope
 
-The original project is [`Nicholas-03/url-shortener-k8s`](https://github.com/Nicholas-03/url-shortener-k8s). Its public baseline is a single commit credited to `Nicholas-03`; it contains no Filippo-authored commits. Filippo's portfolio contribution is this later security and reliability refactor, and the original assignment implementation is not claimed as his work.
-
-The refactor replaces the baseline's hard-coded, hand-rolled token scheme and plaintext password storage; removes references to a dead public demo; and adds deterministic tests and reproducible development tooling. Commit history remains the source of truth for individual changes.
+The work group included 3 people: Filippo, Nicholas and Jonas. The original project is [`Nicholas-03/url-shortener-k8s`](https://github.com/Nicholas-03/url-shortener-k8s). Filippo shared the workload with Nicholas and Jonas - improved the normal workflow and reliability of this project.
 
 ## What this branch demonstrates
 
